@@ -53,8 +53,13 @@ class PxcHandshake(
                 // acks from the bike — nothing to do
             }
             else -> {
+                // Unknown control cmd. Log BOTH text and hex — button/HID events from the bike's
+                // physical keys (supportHID=true) would surface here as binary payloads, so hex is
+                // what lets us map Up/Down/OK/Back. Keep the hex bounded so a big JSON blob (e.g. the
+                // voice-command list) doesn't flood the log.
+                val hex = BleProtocol.bytesToHex(frame.payload.copyOf(minOf(64, frame.payload.size)))
                 log("[$tag] cmd=0x${frame.cmd.toUInt().toString(16)} (${PxcFrame.nameOf(frame.cmd)}) " +
-                    "len=${frame.payload.size} ${frame.payload.asText()}")
+                    "len=${frame.payload.size} hex=$hex ${frame.payload.asText().take(80)}")
             }
         }
     }
