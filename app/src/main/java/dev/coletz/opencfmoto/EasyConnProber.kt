@@ -45,6 +45,11 @@ class EasyConnProber(
     private val servers = ArrayList<ServerSocket>()
     private var multicastLock: WifiManager.MulticastLock? = null
     private var heartbeatThread: Thread? = null
+    // Open PXC control (10922) sockets. Some bikes (e.g. CL-C450, sdk 0.9.23.4) never send
+    // heartbeats and drop the whole session if the control socket sees no traffic for ~7s. We
+    // proactively send 0x70000000 heartbeats on every open control socket to keep it alive.
+    private val ctrlSockets = java.util.concurrent.CopyOnWriteArrayList<Socket>()
+    private var ctrlHeartbeatThread: Thread? = null
     @Volatile private var running = false
     @Volatile private var probed = false
     @Volatile private var video: VideoPipeline? = null
@@ -99,6 +104,25 @@ class EasyConnProber(
             sendMdnsRespond(bikeIp, myIp, network)
         }
         startHeartbeatLog()
+        startCtrlHeartbeats()
+    }
+
+    /**
+     * Keep the PXC control socket(s) alive by sending 0x70000000 heartbeats every 2s. Bikes that
+     * don't emit their own heartbeats (CL-C450) drop the whole session after ~7s of control-socket
+     * silence even while media frames keep flowing on 10920. Writes are frame-atomic (PxcFrame.write
+     * synchronizes on the stream) so they can't corrupt a concurrent handshake reply.
+     */
+    private fun startCtrlHeartbeats() {
+        ctrlHeartbeatThread = thread(name = "ec-ctrl-hb", isDaemon = true) {
+            while (running) {
+                try { Thread.sleep(2000) } catch (_: InterruptedException) { break }
+                for (s in ctrlSockets) {
+                    try { PxcFrame(PxcFrame.CMD_HEARTBEAT, ByteArray(0)).write(s.getOutputStream()) }
+                    catch (_: Exception) { /* socket closing; readLoop's finally removes it */ }
+                }
+            }
+        }
     }
 
     fun stop() {
@@ -108,6 +132,8 @@ class EasyConnProber(
         if (ownsVideo) video?.stop()
         video = null; ownsVideo = false
         heartbeatThread?.interrupt(); heartbeatThread = null
+        ctrlHeartbeatThread?.interrupt(); ctrlHeartbeatThread = null
+        ctrlSockets.clear()
         for (s in servers) try { s.close() } catch (_: IOException) {}
         servers.clear()
         multicastLock?.let { try { if (it.isHeld) it.release() } catch (_: Exception) {} }
@@ -179,6 +205,7 @@ class EasyConnProber(
             //   10922 = PXC control (16-byte CmdBaseHead); 10921/10920 = media (8-byte ReqBase).
             if (port == PORT_PXC_CTRL) {
                 log("[$tag] framing=CmdBaseHead (PXC control)")
+                ctrlSockets.add(socket)   // keep this socket warm via ctrlHeartbeatThread
                 while (running) {
                     val frame = try { PxcFrame.read(input) } catch (e: Exception) {
                         log("[$tag] frame error: ${e.message}"); return
@@ -193,6 +220,7 @@ class EasyConnProber(
         } catch (e: IOException) {
             log("[$tag] read error: ${e.message}")
         } finally {
+            ctrlSockets.remove(socket)
             try { socket.close() } catch (_: IOException) {}
         }
     }
@@ -393,7 +421,7 @@ class EasyConnProber(
             while (running) {
                 try { Thread.sleep(5000) } catch (_: InterruptedException) { break }
                 i++
-                log("hb#$i probed=$probed video=${video != null} framesSent=$framesSent openServers=${servers.count { !it.isClosed }}")
+                log("hb#$i probed=$probed video=${video != null} framesSent=$framesSent openServers=${servers.count { !it.isClosed }} ctrlSockets=${ctrlSockets.size}")
             }
         }
     }

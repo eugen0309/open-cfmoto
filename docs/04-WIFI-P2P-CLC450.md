@@ -41,6 +41,28 @@ CL-C450 in Settings → Bike model _before_ tapping Start Android Auto.** The pr
 it, stop, pick CL-C450, and start again. (A future improvement could recreate the AA pipeline at the
 bike-negotiated size to remove this ordering constraint.)
 
+## Update — third CL-C450 session: the map renders (round-dash crop) + reconnect loop
+
+The dash now shows the live Android Auto map (cropped by the physical round display — a cosmetic
+DPI/layout matter, not a pipeline bug). But the session **reconnects every ~7.2 s**: the bike
+re-runs the full CAR_CTRL→CLIENT_INFO→media handshake on fresh sockets, briefly streams, drops, and
+repeats.
+
+Root cause: the CL-C450 (`sdkVersion 0.9.23.4`) **never sends control-plane heartbeats**
+(`0x70000000`), and our code only ever *replied* to heartbeats — it never *sent* them. After the
+handshake the control socket (10922) goes silent; the bike's ~7 s watchdog fires and it resets the
+whole session, even though video frames keep flowing on 10920 (that socket has its own frame-pull
+keepalive). The 675 avoided this only because *it* sends the heartbeats.
+
+Fix: `EasyConnProber.startCtrlHeartbeats()` — the phone now sends a `0x70000000` heartbeat on every
+open PXC control socket every 2 s (`ctrlSockets` registry + `ec-ctrl-hb` thread). Writes are
+frame-atomic (`PxcFrame.write` synchronizes on the stream). The periodic `hb#N` log line now also
+reports `ctrlSockets=N`.
+
+Still unhandled but non-fatal (bike proceeds without a reply): `cmd=0x10450` (len 0, after CAR_DATA)
+and `cmd=0x10470` (Chinese voice-command registration JSON). If the reconnect persists *after* the
+heartbeat fix, replying to these (`0x10451` / `0x10471`) is the next thing to try.
+
 ## Why this exists
 
 The 675 SR connects over an **infrastructure Wi-Fi AP** (`WifiNetworkSpecifier`, gateway
