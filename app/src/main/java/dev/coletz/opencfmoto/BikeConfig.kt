@@ -29,11 +29,13 @@ enum class BikeModel(
 ) {
     SR_675("675 SR-R", 800, 384, 800, 480),
 
-    // CL-C450: connects over Wi-Fi Direct (P2P), unlike the AP-mode 675. Panel geometry below is
-    // an UNCONFIRMED placeholder (copied from the 675). Once a CL-C450 session logs its
-    // [BIKE-REPORT] line (panel WxH from REQ_RV_CONFIG_CAPTURE), replace these with the real
-    // values — the prober already warns when the reported panel differs from the selected model.
-    CL_C450("CL-C450", 800, 384, 800, 480);
+    // CL-C450: near-square 544x512 dash. Confirmed from a live session's REQ_RV_CONFIG_CAPTURE
+    // ([BIKE-REPORT] panel=544x512, HUName=CFMOTO-48FB4C, sdkVersion 0.9.23.4). No standard AA
+    // landscape resolution is >=544x512 (800x480 is too short), so the smallest AA codec size that
+    // contains the panel is 1280x720; the phone renders AA into a centered 544x512 viewport
+    // (margins 736x208) that SurfaceCropper extracts 1:1. dpi is tunable in Settings.
+    // NOTE: reaches the bike via the AP path (Transport.AUTO) — see docs/04.
+    CL_C450("CL-C450", 544, 512, 1280, 720);
 
     init {
         require(bikeWidth <= aaWidth && bikeHeight <= aaHeight) {

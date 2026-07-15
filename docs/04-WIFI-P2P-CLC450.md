@@ -19,6 +19,28 @@ Net: for the CL-C450 the **AP path + gateway-derivation fallback is the working 
 as a fallback for any bike whose GO refuses a legacy `WifiNetworkSpecifier` association, but is not
 required here. The rest of this doc describes that `WifiP2pManager` path.
 
+## Update — second CL-C450 session: panel geometry
+
+Full PXC handshake now completes (probe → CLIENT_INFO → media negotiation → frames sent). But the
+dash showed **black** then dropped, because of a resolution mismatch:
+
+- The CL-C450 panel is **544×512** (`REQ_RV_CONFIG_CAPTURE w=544 h=512`), a near-square dash — NOT
+  800×384. HUName `CFMOTO-48FB4C`, `sdkVersion 0.9.23.4`, `channel 66660736`.
+- Android Auto's encoder is created at the **selected BikeModel's** size *before* the bike
+  negotiates. That session had **675 SR-R** selected, so the phone advertised RLY_CONFIG_CAPTURE as
+  544×512 but actually streamed **800×384** frames from the AA pipeline. The bike's decoder, set up
+  for 544×512, choked after ~14 frames and closed the socket → black screen.
+
+Fix: the `CL_C450` model is now **544×512 panel / 1280×720 AA** (the smallest AA codec size that
+contains 544×512; 800×480 is too short). AA renders into a centered 544×512 viewport (margins
+736×208) that SurfaceCropper extracts, and the encoder produces the 544×512 the bike expects.
+
+**Operational requirement:** because the AA encoder is sized at AA-start, you must **select
+CL-C450 in Settings → Bike model _before_ tapping Start Android Auto.** The prober logs a
+`[BIKE-REPORT] !! bike reports … but selected model is …` warning if they don't match; if you see
+it, stop, pick CL-C450, and start again. (A future improvement could recreate the AA pipeline at the
+bike-negotiated size to remove this ordering constraint.)
+
 ## Why this exists
 
 The 675 SR connects over an **infrastructure Wi-Fi AP** (`WifiNetworkSpecifier`, gateway
