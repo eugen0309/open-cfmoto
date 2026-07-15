@@ -232,13 +232,13 @@ object BikeWifiP2p {
     private fun pollLocalP2pIp(ifaceName: String?, log: (String) -> Unit): Inet4Address? {
         val deadline = System.currentTimeMillis() + IP_POLL_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline && active) {
-            localP2pIpv4(ifaceName)?.let { return it }
+            localP2pIpv4(ifaceName, log)?.let { return it }
             try { Thread.sleep(IP_POLL_INTERVAL_MS) } catch (_: InterruptedException) { return null }
         }
-        return localP2pIpv4(ifaceName)
+        return localP2pIpv4(ifaceName, log)
     }
 
-    private fun localP2pIpv4(ifaceName: String?): Inet4Address? {
+    private fun localP2pIpv4(ifaceName: String?, log: (String) -> Unit): Inet4Address? {
         try {
             for (ni in NetworkInterface.getNetworkInterfaces()) {
                 if (!ni.isUp || ni.isLoopback) continue
