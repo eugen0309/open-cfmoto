@@ -74,7 +74,7 @@ class EasyConnProber(
 
         val myIp = bindIpOverride ?: pickBikeInterfaceIp(network)
         if (myIp == null) { log("could not resolve our IPv4 on the bike network; aborting"); return }
-        val bikeIp = gatewayOverride ?: resolveGateway(network)
+        val bikeIp = gatewayOverride ?: resolveGateway(network) ?: deriveGatewayFromSubnet(myIp)
         if (bikeIp == null) { log("could not resolve bike gateway IP; aborting"); return }
         log("our IP=${myIp.hostAddress}  bike IP=${bikeIp.hostAddress}" +
             if (bindIpOverride != null) "  (Wi-Fi Direct / P2P)" else "")
@@ -342,6 +342,24 @@ class EasyConnProber(
             }
         }
         return lp.dnsServers.filterIsInstance<Inet4Address>().firstOrNull()
+    }
+
+    /**
+     * Fallback when the link exposes no default route and no DNS server — which is exactly the
+     * case for a Wi-Fi Direct Group Owner (e.g. CL-C450: phone gets 192.168.49.122/24 on an
+     * on-link-only route, bike GO is at 192.168.49.1). Derives the gateway as `.1` of our own /24.
+     * This also matches the AP-mode bike (192.168.0.50 → 192.168.0.1), so it is a safe last resort;
+     * it only runs after the route/DNS lookups above have already failed.
+     */
+    private fun deriveGatewayFromSubnet(myIp: Inet4Address): Inet4Address? {
+        val octets = myIp.address
+        if (octets.size != 4 || (octets[3].toInt() and 0xFF) == 1) return null  // we ARE .1 → can't derive
+        octets[3] = 1
+        return try {
+            (java.net.InetAddress.getByAddress(octets) as? Inet4Address)?.also {
+                log("[gw] no default route/DNS on this link; derived bike gateway ${it.hostAddress} from our subnet")
+            }
+        } catch (_: Exception) { null }
     }
 
     private fun pickBikeInterfaceIp(network: Network?): Inet4Address? {

@@ -1,5 +1,24 @@
 # Wi-Fi Direct (P2P) support — CL-C450
 
+## Update — first CL-C450 session (2026-07-15)
+
+First real session corrected the original assumption below. Findings from the CL-C450 QR + log:
+
+- QR: `action=73` (AP+P2P+BT), `ssid=DIRECT-go-CFMOTO-48FB4C`, `pwd=12345678`, `auth=WPA`. Because
+  the **AP bit is set**, `Transport.AUTO` correctly chose the AP path.
+- **The plain `WifiNetworkSpecifier` AP join associated to the Wi-Fi Direct Group Owner as a legacy
+  client** — no `WifiP2pManager` needed. The phone got `192.168.49.122/24` on `wlan1`, GO at
+  `192.168.49.1` (the standard Wi-Fi Direct subnet).
+- The **only** blocker was gateway resolution: a P2P GO link has **no default route and no DNS
+  server**, so `EasyConnProber.resolveGateway()` returned null and aborted. Fixed by adding
+  `deriveGatewayFromSubnet()` — when route/DNS lookup fails, use `.1` of our own /24
+  (→ `192.168.49.1`). AA decode was already steady at ~30 fps before the abort.
+
+Net: for the CL-C450 the **AP path + gateway-derivation fallback is the working route**, on
+`Transport.AUTO`. The `WifiP2pManager` path (`BikeWifiP2p`, "Force Wi-Fi Direct (P2P)") is retained
+as a fallback for any bike whose GO refuses a legacy `WifiNetworkSpecifier` association, but is not
+required here. The rest of this doc describes that `WifiP2pManager` path.
+
 ## Why this exists
 
 The 675 SR connects over an **infrastructure Wi-Fi AP** (`WifiNetworkSpecifier`, gateway
