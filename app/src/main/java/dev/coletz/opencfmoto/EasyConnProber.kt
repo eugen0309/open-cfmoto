@@ -45,6 +45,11 @@ class EasyConnProber(
     private val servers = ArrayList<ServerSocket>()
     private var multicastLock: WifiManager.MulticastLock? = null
     private var heartbeatThread: Thread? = null
+    // Open PXC control (10922) sockets. Some bikes (e.g. CL-C450, sdk 0.9.23.4) never send
+    // heartbeats and drop the whole session if the control socket sees no traffic for ~7s. We
+    // proactively send 0x70000000 heartbeats on every open control socket to keep it alive.
+    private val ctrlSockets = java.util.concurrent.CopyOnWriteArrayList<Socket>()
+    private var ctrlHeartbeatThread: Thread? = null
     @Volatile private var running = false
     @Volatile private var probed = false
     @Volatile private var video: VideoPipeline? = null
@@ -55,15 +60,29 @@ class EasyConnProber(
     @Volatile private var negH = BikeConfig.model.bikeHeight
     @Volatile private var framesSent = 0
 
-    fun start(network: Network?) {
+    /**
+     * @param network the bike Wi-Fi network for an AP (infrastructure) join, or null for Wi-Fi
+     *   Direct (P2P) where there is no such [Network] object.
+     * @param bindIpOverride when non-null (P2P path), the phone's P2P-interface IPv4 to bind our
+     *   server/probe sockets to, instead of deriving it from [network]. On a 192.168.49.0/24 P2P
+     *   link this is enough to route over the P2P interface without `bindProcessToNetwork`.
+     * @param gatewayOverride when non-null (P2P path), the bike's address (the Group Owner,
+     *   typically 192.168.49.1), instead of deriving it from [network]'s routes.
+     */
+    fun start(
+        network: Network?,
+        bindIpOverride: Inet4Address? = null,
+        gatewayOverride: Inet4Address? = null,
+    ) {
         if (running) { log("already running"); return }
         dumpEnvironment(network)
 
-        val myIp = pickBikeInterfaceIp(network)
+        val myIp = bindIpOverride ?: pickBikeInterfaceIp(network)
         if (myIp == null) { log("could not resolve our IPv4 on the bike network; aborting"); return }
-        val bikeIp = resolveGateway(network)
+        val bikeIp = gatewayOverride ?: resolveGateway(network) ?: deriveGatewayFromSubnet(myIp)
         if (bikeIp == null) { log("could not resolve bike gateway IP; aborting"); return }
-        log("our IP=${myIp.hostAddress}  bike IP=${bikeIp.hostAddress}")
+        log("our IP=${myIp.hostAddress}  bike IP=${bikeIp.hostAddress}" +
+            if (bindIpOverride != null) "  (Wi-Fi Direct / P2P)" else "")
 
         running = true
         acquireMulticastLock()
@@ -85,6 +104,25 @@ class EasyConnProber(
             sendMdnsRespond(bikeIp, myIp, network)
         }
         startHeartbeatLog()
+        startCtrlHeartbeats()
+    }
+
+    /**
+     * Keep the PXC control socket(s) alive by sending 0x70000000 heartbeats every 2s. Bikes that
+     * don't emit their own heartbeats (CL-C450) drop the whole session after ~7s of control-socket
+     * silence even while media frames keep flowing on 10920. Writes are frame-atomic (PxcFrame.write
+     * synchronizes on the stream) so they can't corrupt a concurrent handshake reply.
+     */
+    private fun startCtrlHeartbeats() {
+        ctrlHeartbeatThread = thread(name = "ec-ctrl-hb", isDaemon = true) {
+            while (running) {
+                try { Thread.sleep(2000) } catch (_: InterruptedException) { break }
+                for (s in ctrlSockets) {
+                    try { PxcFrame(PxcFrame.CMD_HEARTBEAT, ByteArray(0)).write(s.getOutputStream()) }
+                    catch (_: Exception) { /* socket closing; readLoop's finally removes it */ }
+                }
+            }
+        }
     }
 
     fun stop() {
@@ -94,6 +132,8 @@ class EasyConnProber(
         if (ownsVideo) video?.stop()
         video = null; ownsVideo = false
         heartbeatThread?.interrupt(); heartbeatThread = null
+        ctrlHeartbeatThread?.interrupt(); ctrlHeartbeatThread = null
+        ctrlSockets.clear()
         for (s in servers) try { s.close() } catch (_: IOException) {}
         servers.clear()
         multicastLock?.let { try { if (it.isHeld) it.release() } catch (_: Exception) {} }
@@ -165,6 +205,7 @@ class EasyConnProber(
             //   10922 = PXC control (16-byte CmdBaseHead); 10921/10920 = media (8-byte ReqBase).
             if (port == PORT_PXC_CTRL) {
                 log("[$tag] framing=CmdBaseHead (PXC control)")
+                ctrlSockets.add(socket)   // keep this socket warm via ctrlHeartbeatThread
                 while (running) {
                     val frame = try { PxcFrame.read(input) } catch (e: Exception) {
                         log("[$tag] frame error: ${e.message}"); return
@@ -179,6 +220,7 @@ class EasyConnProber(
         } catch (e: IOException) {
             log("[$tag] read error: ${e.message}")
         } finally {
+            ctrlSockets.remove(socket)
             try { socket.close() } catch (_: IOException) {}
         }
     }
@@ -330,6 +372,24 @@ class EasyConnProber(
         return lp.dnsServers.filterIsInstance<Inet4Address>().firstOrNull()
     }
 
+    /**
+     * Fallback when the link exposes no default route and no DNS server — which is exactly the
+     * case for a Wi-Fi Direct Group Owner (e.g. CL-C450: phone gets 192.168.49.122/24 on an
+     * on-link-only route, bike GO is at 192.168.49.1). Derives the gateway as `.1` of our own /24.
+     * This also matches the AP-mode bike (192.168.0.50 → 192.168.0.1), so it is a safe last resort;
+     * it only runs after the route/DNS lookups above have already failed.
+     */
+    private fun deriveGatewayFromSubnet(myIp: Inet4Address): Inet4Address? {
+        val octets = myIp.address
+        if (octets.size != 4 || (octets[3].toInt() and 0xFF) == 1) return null  // we ARE .1 → can't derive
+        octets[3] = 1
+        return try {
+            (java.net.InetAddress.getByAddress(octets) as? Inet4Address)?.also {
+                log("[gw] no default route/DNS on this link; derived bike gateway ${it.hostAddress} from our subnet")
+            }
+        } catch (_: Exception) { null }
+    }
+
     private fun pickBikeInterfaceIp(network: Network?): Inet4Address? {
         if (network != null) {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -361,7 +421,7 @@ class EasyConnProber(
             while (running) {
                 try { Thread.sleep(5000) } catch (_: InterruptedException) { break }
                 i++
-                log("hb#$i probed=$probed video=${video != null} framesSent=$framesSent openServers=${servers.count { !it.isClosed }}")
+                log("hb#$i probed=$probed video=${video != null} framesSent=$framesSent openServers=${servers.count { !it.isClosed }} ctrlSockets=${ctrlSockets.size}")
             }
         }
     }

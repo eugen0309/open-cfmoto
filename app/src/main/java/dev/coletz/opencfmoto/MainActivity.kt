@@ -168,6 +168,7 @@ class MainActivity : AppCompatActivity() {
             ProjectionHolder.projection = null
             ProjectionService.stop(this)
             BikeWifi.leave(this, ::log)
+            BikeWifiP2p.stop(::log)
         }
 
         findViewById<Button>(R.id.btn_settings).setOnClickListener { showSettingsDialog() }
@@ -194,10 +195,21 @@ class MainActivity : AppCompatActivity() {
         // NOTE: AndroidAutoService is intentionally NOT stopped here — it is a foreground service
         // meant to keep running when the phone is backgrounded/locked. Use "Stop Android Auto".
         BikeWifi.leave(this, ::log)
+        BikeWifiP2p.stop(::log)
         super.onDestroy()
     }
 
     private fun joinAndStart(qr: QrData) {
+        val useP2p = when (BikeConfig.transport) {
+            Transport.AP -> false
+            Transport.P2P -> true
+            Transport.AUTO -> qr.supportsP2p && !qr.supportsAp
+        }
+        log("→ connection mode: ${BikeConfig.transport.displayName} → using ${if (useP2p) "Wi-Fi Direct (P2P)" else "Wi-Fi AP"}")
+        if (useP2p) joinP2pAndStart(qr) else joinApAndStart(qr)
+    }
+
+    private fun joinApAndStart(qr: QrData) {
         BikeWifi.join(
             context = this,
             ssid = qr.ssid,
@@ -215,6 +227,43 @@ class MainActivity : AppCompatActivity() {
             onLost = { log("bike network lost") },
             log = ::log,
         )
+    }
+
+    private fun joinP2pAndStart(qr: QrData) {
+        if (!ensureP2pPermission()) {
+            log("→ Wi-Fi Direct needs a permission; grant it and tap Scan again")
+            return
+        }
+        BikeWifiP2p.connect(
+            context = this,
+            qr = qr,
+            onConnected = { bindIp, gatewayIp ->
+                log("→ P2P group up; starting EasyConn PXC flow (bind=${bindIp.hostAddress} bike=${gatewayIp.hostAddress}) …")
+                try {
+                    // No Network object for P2P: pass the explicit addresses so the prober binds
+                    // its sockets to the P2P interface directly.
+                    prober.start(network = null, bindIpOverride = bindIp, gatewayOverride = gatewayIp)
+                } catch (e: Exception) {
+                    log("prober start failed: $e")
+                }
+            },
+            onFailed = { reason -> log("→ Wi-Fi Direct connect failed: $reason") },
+            log = ::log,
+        )
+    }
+
+    /**
+     * Wi-Fi Direct needs NEARBY_WIFI_DEVICES on Android 13+ (else ACCESS_FINE_LOCATION). Returns
+     * true if already granted; otherwise requests it and returns false (user re-taps Scan after).
+     */
+    private fun ensureP2pPermission(): Boolean {
+        val perm = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU)
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        else
+            Manifest.permission.ACCESS_FINE_LOCATION
+        if (ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED) return true
+        ActivityCompat.requestPermissions(this, arrayOf(perm), 4)
+        return false
     }
 
     private fun runBleWakeUpThenProber() {
@@ -259,6 +308,7 @@ class MainActivity : AppCompatActivity() {
         val items = arrayOf(
             "Bike model: ${BikeConfig.model.displayName}",
             "Android Auto DPI: $dpiLabel",
+            "Connection mode: ${BikeConfig.transport.displayName}",
         )
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Settings")
@@ -266,9 +316,25 @@ class MainActivity : AppCompatActivity() {
                 when (which) {
                     0 -> showBikeModelDialog()
                     1 -> showDpiDialog()
+                    2 -> showTransportDialog()
                 }
             }
             .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showTransportDialog() {
+        val options = Transport.entries
+        val labels = options.map { it.displayName }.toTypedArray()
+        val current = options.indexOf(BikeConfig.transport)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Connection mode")
+            .setSingleChoiceItems(labels, current) { dialog, which ->
+                BikeConfig.saveTransport(applicationContext, options[which])
+                log("→ connection mode set: ${options[which].displayName}")
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
