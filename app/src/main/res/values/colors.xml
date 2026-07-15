@@ -2,4 +2,13 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Home-screen accents -->
+    <color name="start_green">#2E7D32</color>
+    <color name="stop_red">#C62828</color>
+    <color name="status_idle">#9E9E9E</color>
+
+    <!-- Log screen (dark console) -->
+    <color name="log_bg">#111111</color>
+    <color name="log_text">#9CDCFE</color>
 </resources>

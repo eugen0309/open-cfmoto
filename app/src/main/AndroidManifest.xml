@@ -55,6 +55,10 @@
         <activity
             android:name=".QrScanActivity"
             android:exported="false" />
+        <activity
+            android:name=".LogActivity"
+            android:exported="false"
+            android:label="Logs" />
         <service
             android:name=".ProjectionService"
             android:exported="false"

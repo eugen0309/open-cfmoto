@@ -4,13 +4,12 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.projection.MediaProjection
+import android.content.res.ColorStateList
 import android.media.projection.MediaProjectionManager
-import android.net.Uri
 import android.os.Bundle
-import android.text.method.ScrollingMovementMethod
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
@@ -18,21 +17,18 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var logView: TextView
-    private lateinit var logScroll: ScrollView
+    private lateinit var statusHeadline: TextView
+    private lateinit var statusSub: TextView
+    private lateinit var activityLine: TextView
+    private lateinit var primaryBtn: Button
     private lateinit var prober: EasyConnProber
     private var bleWakeUp: BleWakeUp? = null
-    private val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    private val handler = Handler(Looper.getMainLooper())
 
     private val scanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -84,38 +80,31 @@ class MainActivity : AppCompatActivity() {
                         ProjectionService.stop(this@MainActivity)
                     }
                 } else if (tries++ < maxTries) {
-                    logView.postDelayed(this, 100)
+                    handler.postDelayed(this, 100)
                 } else {
                     log("foreground service did not start within 5s — aborting mirror")
                     ProjectionService.stop(this@MainActivity)
                 }
             }
         }
-        logView.post(poll)
+        handler.post(poll)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContentView(R.layout.activity_main)
+        val basePad = (20 * resources.displayMetrics.density).toInt()
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
             val b = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(b.left, b.top, b.right, b.bottom)
+            v.setPadding(basePad + b.left, basePad + b.top, basePad + b.right, basePad + b.bottom)
             insets
         }
 
-        logView = findViewById(R.id.log_view)
-        logScroll = findViewById(R.id.log_scroll)
-        logView.movementMethod = ScrollingMovementMethod()
-
-        // All components (bike PXC, Android Auto receiver, video pipeline — including those
-        // running in the foreground service) log through LogBus; mirror it into the view.
-        LogBus.listener = { line ->
-            runOnUiThread {
-                logView.append("$line\n")
-                logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
-            }
-        }
+        statusHeadline = findViewById(R.id.status_headline)
+        statusSub = findViewById(R.id.status_sub)
+        activityLine = findViewById(R.id.activity_line)
+        primaryBtn = findViewById(R.id.btn_primary)
 
         BikeConfig.load(applicationContext)
         prober = EasyConnProber(applicationContext, ::log)
@@ -131,56 +120,93 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // Android Auto receiver runs in its own foreground service so it survives lock/background.
-        findViewById<Button>(R.id.btn_aa_start).setOnClickListener {
-            log("→ starting Android Auto receiver (loopback self-mode). Ensure Android Auto is installed & set up.")
-            // Once AA video is flowing steadily, auto-open the bike QR scanner so the hand-off
-            // doesn't depend on scanning in the right order. One-shot; runs on the UI thread.
-            AaVideoBridge.onSteadyVideo = {
-                runOnUiThread {
-                    AaVideoBridge.onSteadyVideo = null
-                    log("→ Android Auto video is live — opening bike QR scanner")
-                    ProjectionHolder.projection = null   // bike uses the AA pipeline, not mirror
-                    ensureLocationPermission()
-                    try {
-                        scanLauncher.launch(Intent(this, QrScanActivity::class.java))
-                    } catch (e: Exception) {
-                        log("auto-scan launch failed ($e) — tap Scan manually")
-                    }
+        primaryBtn.setOnClickListener {
+            if (AndroidAutoService.isRunning) doStop() else doStart()
+        }
+        findViewById<Button>(R.id.btn_settings).setOnClickListener { showSettingsDialog() }
+        findViewById<Button>(R.id.btn_logs).setOnClickListener {
+            startActivity(Intent(this, LogActivity::class.java))
+        }
+
+        log("Ready. Tap Start Android Auto.")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Reclaim the log stream (LogActivity may have held it) and surface the latest line as a
+        // subtle activity ticker, so the home screen feels live without showing the full log.
+        LogBus.listener = { line -> runOnUiThread { activityLine.text = line } }
+        refreshUi()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        LogBus.listener = null   // LogActivity (or nothing) takes over
+    }
+
+    /** Reflect the (settled) service run state on resume. */
+    private fun refreshUi() = setRunningUi(AndroidAutoService.isRunning)
+
+    /** Apply the run-state look explicitly (start/stop flip the UI before the service settles). */
+    private fun setRunningUi(running: Boolean) {
+        primaryBtn.text = if (running) "Stop" else "Start Android Auto"
+        primaryBtn.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(this, if (running) R.color.stop_red else R.color.start_green)
+        )
+        statusSub.text = "${BikeConfig.model.displayName}  ·  ${BikeConfig.transport.displayName}"
+        setHeadline(if (running) "Android Auto running" else "Not connected", running)
+    }
+
+    private fun setHeadline(text: String, active: Boolean) {
+        statusHeadline.text = text
+        statusHeadline.setTextColor(
+            ContextCompat.getColor(this, if (active) R.color.start_green else R.color.status_idle)
+        )
+    }
+
+    /** Start the Android Auto receiver; the bike QR scanner auto-opens once AA video is steady. */
+    private fun doStart() {
+        log("→ starting Android Auto receiver (loopback self-mode). Ensure Android Auto is installed & set up.")
+        // Once AA video is flowing steadily, auto-open the bike QR scanner so the hand-off
+        // doesn't depend on scanning in the right order. One-shot; runs on the UI thread.
+        AaVideoBridge.onSteadyVideo = {
+            runOnUiThread {
+                AaVideoBridge.onSteadyVideo = null
+                log("→ Android Auto video is live — opening bike QR scanner")
+                setHeadline("Scan the bike QR…", true)
+                ProjectionHolder.projection = null   // bike uses the AA pipeline, not mirror
+                ensureLocationPermission()
+                try {
+                    scanLauncher.launch(Intent(this, QrScanActivity::class.java))
+                } catch (e: Exception) {
+                    log("auto-scan launch failed ($e) — tap Scan manually")
                 }
             }
-            AndroidAutoService.start(this)
-            // Trigger Google AA to project from the FOREGROUND activity (background-activity-launch
-            // safe on Android 12+/15), after giving the service's :5288 server time to bind.
-            logView.postDelayed({
-                dev.coletz.opencfmoto.aa.AaSelfMode.trigger(this, log = ::log)
-            }, 900)
         }
-        // Stop everything: Android Auto receiver, bike PXC, projection, and leave the bike Wi-Fi.
-        findViewById<Button>(R.id.btn_aa_stop).setOnClickListener {
-            log("→ stopping everything (Android Auto + bike)")
-            AaVideoBridge.onSteadyVideo = null
-            AndroidAutoService.stop(this)
-            prober.stop()
-            bleWakeUp?.stop()
-            bleWakeUp = null
-            ProjectionHolder.projection?.let { try { it.stop() } catch (_: Exception) {} }
-            ProjectionHolder.projection = null
-            ProjectionService.stop(this)
-            BikeWifi.leave(this, ::log)
-            BikeWifiP2p.stop(::log)
-        }
+        AndroidAutoService.start(this)
+        // Trigger Google AA to project from the FOREGROUND activity (background-activity-launch
+        // safe on Android 12+/15), after giving the service's :5288 server time to bind.
+        handler.postDelayed({
+            dev.coletz.opencfmoto.aa.AaSelfMode.trigger(this, log = ::log)
+        }, 900)
+        setRunningUi(true)
+        setHeadline("Starting Android Auto…", true)   // more specific than setRunningUi's default
+    }
 
-        findViewById<Button>(R.id.btn_settings).setOnClickListener { showSettingsDialog() }
-
-        findViewById<Button>(R.id.btn_share_log).setOnClickListener { shareLog() }
-
-        findViewById<Button>(R.id.btn_clear).setOnClickListener {
-            LogBus.clear()
-            logView.text = ""
-        }
-
-        log("Ready. tap Start and wait for the QR code scanner to show up.")
+    /** Stop everything: Android Auto receiver, bike PXC, projection, and leave the bike Wi-Fi. */
+    private fun doStop() {
+        log("→ stopping everything (Android Auto + bike)")
+        AaVideoBridge.onSteadyVideo = null
+        AndroidAutoService.stop(this)
+        prober.stop()
+        bleWakeUp?.stop()
+        bleWakeUp = null
+        ProjectionHolder.projection?.let { try { it.stop() } catch (_: Exception) {} }
+        ProjectionHolder.projection = null
+        ProjectionService.stop(this)
+        BikeWifi.leave(this, ::log)
+        BikeWifiP2p.stop(::log)
+        setRunningUi(false)
     }
 
     override fun onDestroy() {
@@ -406,26 +432,6 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.requestPermissions(
                 this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 1,
             )
-        }
-    }
-
-    private fun shareLog() {
-        try {
-            val dir = File(cacheDir, "logs").apply { mkdirs() }
-            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-            val file = File(dir, "opencfmoto-$stamp.log")
-            file.writeText(LogBus.snapshot())
-            val uri: Uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-            val send = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_SUBJECT, "opencfmoto log $stamp")
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            startActivity(Intent.createChooser(send, "Share log"))
-            log("log saved: ${file.absolutePath} (${file.length()} bytes)")
-        } catch (e: Exception) {
-            log("share failed: $e")
         }
     }
 
