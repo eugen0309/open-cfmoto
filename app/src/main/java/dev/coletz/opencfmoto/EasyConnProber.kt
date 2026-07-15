@@ -55,15 +55,29 @@ class EasyConnProber(
     @Volatile private var negH = BikeConfig.model.bikeHeight
     @Volatile private var framesSent = 0
 
-    fun start(network: Network?) {
+    /**
+     * @param network the bike Wi-Fi network for an AP (infrastructure) join, or null for Wi-Fi
+     *   Direct (P2P) where there is no such [Network] object.
+     * @param bindIpOverride when non-null (P2P path), the phone's P2P-interface IPv4 to bind our
+     *   server/probe sockets to, instead of deriving it from [network]. On a 192.168.49.0/24 P2P
+     *   link this is enough to route over the P2P interface without `bindProcessToNetwork`.
+     * @param gatewayOverride when non-null (P2P path), the bike's address (the Group Owner,
+     *   typically 192.168.49.1), instead of deriving it from [network]'s routes.
+     */
+    fun start(
+        network: Network?,
+        bindIpOverride: Inet4Address? = null,
+        gatewayOverride: Inet4Address? = null,
+    ) {
         if (running) { log("already running"); return }
         dumpEnvironment(network)
 
-        val myIp = pickBikeInterfaceIp(network)
+        val myIp = bindIpOverride ?: pickBikeInterfaceIp(network)
         if (myIp == null) { log("could not resolve our IPv4 on the bike network; aborting"); return }
-        val bikeIp = resolveGateway(network)
+        val bikeIp = gatewayOverride ?: resolveGateway(network)
         if (bikeIp == null) { log("could not resolve bike gateway IP; aborting"); return }
-        log("our IP=${myIp.hostAddress}  bike IP=${bikeIp.hostAddress}")
+        log("our IP=${myIp.hostAddress}  bike IP=${bikeIp.hostAddress}" +
+            if (bindIpOverride != null) "  (Wi-Fi Direct / P2P)" else "")
 
         running = true
         acquireMulticastLock()

@@ -27,7 +27,13 @@ enum class BikeModel(
     val aaHeight: Int,
     val densityDpi: Int = 160,
 ) {
-    SR_675("675 SR-R", 800, 384, 800, 480);
+    SR_675("675 SR-R", 800, 384, 800, 480),
+
+    // CL-C450: connects over Wi-Fi Direct (P2P), unlike the AP-mode 675. Panel geometry below is
+    // an UNCONFIRMED placeholder (copied from the 675). Once a CL-C450 session logs its
+    // [BIKE-REPORT] line (panel WxH from REQ_RV_CONFIG_CAPTURE), replace these with the real
+    // values — the prober already warns when the reported panel differs from the selected model.
+    CL_C450("CL-C450", 800, 384, 800, 480);
 
     init {
         require(bikeWidth <= aaWidth && bikeHeight <= aaHeight) {
@@ -43,6 +49,20 @@ enum class BikeModel(
 }
 
 /**
+ * How to reach the bike's Wi-Fi.
+ *  - [AUTO]: pick from the QR — AP when it advertises AP, else Wi-Fi Direct (P2P).
+ *  - [AP]:   force the infrastructure-AP join ([BikeWifi]). The verified path for the 675 SR.
+ *  - [P2P]:  force the Wi-Fi Direct join ([BikeWifiP2p]). Needed for the CL-C450.
+ * The force options exist because a bike may advertise both bits in its QR while only one path
+ * actually works — the owner can flip this in Settings without a rebuild while we nail it down.
+ */
+enum class Transport(val displayName: String) {
+    AUTO("Auto (from QR)"),
+    AP("Force Wi-Fi AP"),
+    P2P("Force Wi-Fi Direct (P2P)");
+}
+
+/**
  * Process-wide selected bike model, persisted in SharedPreferences. [load] is called by both
  * MainActivity and AndroidAutoService so the selection survives process restarts regardless of
  * which entry point runs first. The AAP stack (no Context available) reads [model] directly.
@@ -54,6 +74,7 @@ object BikeConfig {
     private const val PREFS = "opencfmoto_settings"
     private const val KEY_BIKE_MODEL = "bike_model"
     private const val KEY_DPI_OVERRIDE = "dpi_override"   // 0 / absent = use the model default
+    private const val KEY_TRANSPORT = "transport"
 
     /** Sane clamp for the DPI reported to the phone; outside this AA renders unusably. */
     const val DPI_MIN = 80
@@ -66,6 +87,10 @@ object BikeConfig {
     @Volatile var dpiOverride: Int? = null
         private set
 
+    /** Selected Wi-Fi transport; see [Transport]. */
+    @Volatile var transport: Transport = Transport.AUTO
+        private set
+
     /** DPI actually reported to the phone: the user override if set, else the model default. */
     val effectiveDpi: Int get() = dpiOverride ?: model.densityDpi
 
@@ -74,7 +99,15 @@ object BikeConfig {
         val name = prefs.getString(KEY_BIKE_MODEL, null)
         model = BikeModel.entries.firstOrNull { it.name == name } ?: BikeModel.SR_675
         dpiOverride = prefs.getInt(KEY_DPI_OVERRIDE, 0).takeIf { it in DPI_MIN..DPI_MAX }
+        val t = prefs.getString(KEY_TRANSPORT, null)
+        transport = Transport.entries.firstOrNull { it.name == t } ?: Transport.AUTO
         return model
+    }
+
+    fun saveTransport(context: Context, newTransport: Transport) {
+        transport = newTransport
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_TRANSPORT, newTransport.name).apply()
     }
 
     fun save(context: Context, newModel: BikeModel) {
